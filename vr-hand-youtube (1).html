@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>VR Hand Control</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; overflow:hidden; width:100vw; height:100dvh; font-family:system-ui,sans-serif; }
+
+  #overlay {
+    position:fixed; inset:0; z-index:100;
+    background:rgba(0,0,0,0.95);
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    gap:24px; padding:32px;
+  }
+  #overlay h1 { color:#7c6fff; font-size:24px; font-weight:700; text-align:center; }
+  #overlay p  { color:#888; font-size:14px; text-align:center; line-height:1.7; max-width:300px; }
+  #status { color:#ff6584; font-size:13px; min-height:20px; text-align:center; }
+  #start-btn {
+    background:#7c6fff; color:#fff; border:none;
+    border-radius:14px; padding:14px 40px;
+    font-size:16px; font-weight:700; cursor:pointer;
+    opacity:0.4; transition:opacity 0.2s;
+  }
+  #start-btn:not(:disabled) { opacity:1; }
+
+  /* camera behind everything */
+  #cam { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; z-index:0; transform:scaleX(-1); }
+
+  /* three.js canvas on top of camera */
+  #three-canvas { position:fixed; inset:0; z-index:1; }
+
+  /* mediapipe hand canvas — hidden, used only for processing */
+  #mp-canvas { display:none; }
+
+  /* cursor dot */
+  #cursor {
+    position:fixed; z-index:10;
+    width:28px; height:28px;
+    border-radius:50%;
+    background:rgba(124,111,255,0.85);
+    border:2px solid #fff;
+    pointer-events:none;
+    transform:translate(-50%,-50%);
+    transition:width 0.1s, height 0.1s, background 0.1s;
+    display:none;
+  }
+  #cursor.grab {
+    width:18px; height:18px;
+    background:rgba(255,101,132,0.9);
+  }
+
+  /* HUD */
+  #hud {
+    position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+    z-index:10; display:none;
+    background:rgba(10,10,20,0.75);
+    border:1px solid rgba(124,111,255,0.3);
+    border-radius:20px; padding:8px 20px;
+    font-size:12px; color:#aaa;
+    backdrop-filter:blur(10px);
+    gap:16px; align-items:center;
+  }
+  #hud.show { display:flex; }
+  #gesture-label { color:#ff6584; font-weight:600; min-width:80px; text-align:center; }
+</style>
+</head>
+<body>
+
+<!-- start overlay -->
+<div id="overlay">
+  <h1>✋ VR Hand Control</h1>
+  <p>امسك الجوال بيد<br>واستخدم اليد الثانية للتحكم<br><br>
+     ✊ قبضة = مسك الـ panel وتحريكه<br>
+     👆 سبابة = cursor<br>
+     👍 إبهام أعلى = صوت+<br>
+     👎 إبهام أسفل = صوت−</p>
+  <div id="status">جاري التحميل...</div>
+  <button id="start-btn" disabled onclick="startVR()">ابدأ VR</button>
+</div>
+
+<video id="cam" autoplay muted playsinline></video>
+<canvas id="mp-canvas"></canvas>
+<canvas id="three-canvas"></canvas>
+<div id="cursor"></div>
+
+<div id="hud">
+  <span id="gesture-label">لا يد</span>
+  <span>|</span>
+  <span id="vol-label">🔊 100%</span>
+</div>
+
+<!-- Three.js -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"></script>
+
+<script>
+// ═══════════════════════════════════════════
+// GLOBALS
+// ═══════════════════════════════════════════
+let scene, camera3d, renderer, panelMesh, panelGroup;
+let ytPlayer = null;
+let volume = 100, muted = false, playing = false;
+let handVisible = false;
+let indexPos = { x: 0, y: 0 }; // normalized 0-1
+let isDragging = false;
+let dragOffset = { x: 0, y: 0 };
+let gestureCooldown = 0;
+const COOLDOWN = 1100;
+
+// panel world position
+let panelWorld = { x: 0, y: 0.5, z: -3 };
+
+// ═══════════════════════════════════════════
+// LOAD SCRIPTS
+// ═══════════════════════════════════════════
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = res;
+    s.onerror = () => rej(new Error('فشل تحميل: ' + src.split('/').pop()));
+    document.head.appendChild(s);
+  });
+}
+
+async function loadAll() {
+  const st = document.getElementById('status');
+  try {
+    st.textContent = 'تحميل drawing_utils...';
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js');
+    st.textContent = 'تحميل camera_utils...';
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js');
+    st.textContent = 'تحميل Hands...';
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js');
+    st.textContent = 'تحميل YouTube API...';
+    await loadScript('https://www.youtube.com/iframe_api');
+    st.textContent = '✅ جاهز';
+    const btn = document.getElementById('start-btn');
+    btn.disabled = false;
+  } catch(e) {
+    st.textContent = '❌ ' + e.message;
+    document.getElementById('start-btn').textContent = 'أعد المحاولة';
+    document.getElementById('start-btn').disabled = false;
+    document.getElementById('start-btn').onclick = loadAll;
+  }
+}
+
+loadAll();
+
+// ═══════════════════════════════════════════
+// YOUTUBE
+// ═══════════════════════════════════════════
+function onYouTubeIframeAPIReady() { /* called by YT — player created in initYT() */ }
+
+function initYT() {
+  // create hidden div for YT
+  const div = document.createElement('div');
+  div.id = 'yt-host';
+  div.style.cssText = 'position:fixed;left:-9999px;top:0;width:640px;height:360px;';
+  document.body.appendChild(div);
+
+  ytPlayer = new YT.Player('yt-host', {
+    width: 640, height: 360,
+    videoId: 'jNQXAC9IVRw',
+    playerVars: { autoplay: 0, controls: 0, rel: 0, modestbranding: 1, playsinline: 1 },
+    events: {
+      onReady: () => { ytPlayer.setVolume(volume); renderYTToTexture(); },
+      onStateChange: (e) => {
+        playing = e.data === YT.PlayerState.PLAYING;
+      }
+    }
+  });
+}
+
+// ═══════════════════════════════════════════
+// THREE.JS SCENE
+// ═══════════════════════════════════════════
+function initThree() {
+  const canvas = document.getElementById('three-canvas');
+  renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x000000, 0);
+
+  scene = new THREE.Scene();
+
+  camera3d = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+  camera3d.position.set(0, 0, 0);
+
+  // ambient light
+  scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+  // panel group
+  panelGroup = new THREE.Group();
+  scene.add(panelGroup);
+
+  // panel geometry — 16:9
+  const geo = new THREE.PlaneGeometry(3.2, 1.8);
+
+  // placeholder texture until YT loads
+  const texCanvas = document.createElement('canvas');
+  texCanvas.width = 640; texCanvas.height = 360;
+  const tc = texCanvas.getContext('2d');
+  tc.fillStyle = '#111';
+  tc.fillRect(0, 0, 640, 360);
+  tc.fillStyle = '#7c6fff';
+  tc.font = 'bold 48px system-ui';
+  tc.textAlign = 'center';
+  tc.fillText('▶ YouTube', 320, 200);
+
+  const tex = new THREE.CanvasTexture(texCanvas);
+  const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.FrontSide });
+
+  panelMesh = new THREE.Mesh(geo, mat);
+  panelGroup.add(panelMesh);
+
+  // panel frame
+  const frameMat = new THREE.MeshBasicMaterial({ color: 0x7c6fff, wireframe: false });
+  const frameGeo = new THREE.EdgesGeometry(geo);
+  const frame = new THREE.LineSegments(frameGeo, new THREE.LineBasicMaterial({ color: 0x7c6fff, linewidth: 2 }));
+  panelGroup.add(frame);
+
+  panelGroup.position.set(panelWorld.x, panelWorld.y, panelWorld.z);
+
+  // cursor sphere
+  const cursorGeo = new THREE.SphereGeometry(0.04, 16, 16);
+  const cursorMat = new THREE.MeshBasicMaterial({ color: 0x7c6fff });
+  window.cursorSphere = new THREE.Mesh(cursorGeo, cursorMat);
+  window.cursorSphere.visible = false;
+  scene.add(window.cursorSphere);
+
+  window.addEventListener('resize', () => {
+    camera3d.aspect = window.innerWidth / window.innerHeight;
+    camera3d.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  animate();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  // smooth panel follow if dragging
+  panelGroup.position.set(panelWorld.x, panelWorld.y, panelWorld.z);
+
+  // gentle float
+  if (!isDragging) {
+    panelGroup.position.y = panelWorld.y + Math.sin(Date.now() * 0.001) * 0.03;
+  }
+
+  renderer.render(scene, camera3d);
+}
+
+// update panel texture from YT iframe
+function renderYTToTexture() {
+  // YT iframe can't be captured to canvas (CORS) in this setup
+  // show a styled panel with controls instead
+  updatePanelTexture();
+  setInterval(updatePanelTexture, 2000);
+}
+
+function updatePanelTexture() {
+  const tc = document.createElement('canvas');
+  tc.width = 640; tc.height = 360;
+  const c = tc.getContext('2d');
+
+  // background
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, 640, 360);
+
+  // gradient
+  const g = c.createLinearGradient(0, 0, 640, 360);
+  g.addColorStop(0, 'rgba(124,111,255,0.15)');
+  g.addColorStop(1, 'rgba(255,101,132,0.08)');
+  c.fillStyle = g;
+  c.fillRect(0, 0, 640, 360);
+
+  // play indicator
+  c.fillStyle = playing ? '#ff6584' : '#7c6fff';
+  c.font = 'bold 72px system-ui';
+  c.textAlign = 'center';
+  c.fillText(playing ? '⏸' : '▶', 320, 160);
+
+  // status text
+  c.fillStyle = '#ccc';
+  c.font = '28px system-ui';
+  c.fillText(playing ? 'جاري التشغيل' : 'متوقف', 320, 220);
+
+  // volume bar
+  c.fillStyle = 'rgba(255,255,255,0.1)';
+  c.fillRect(120, 270, 400, 10);
+  c.fillStyle = muted ? '#555' : '#7c6fff';
+  c.fillRect(120, 270, 400 * (volume / 100), 10);
+
+  c.fillStyle = '#888';
+  c.font = '20px system-ui';
+  c.fillText(muted ? '🔇 كتم' : `🔊 ${volume}%`, 320, 320);
+
+  // border glow
+  c.strokeStyle = isDragging ? '#ff6584' : '#7c6fff';
+  c.lineWidth = 4;
+  c.strokeRect(2, 2, 636, 356);
+
+  if (panelMesh) {
+    panelMesh.material.map = new THREE.CanvasTexture(tc);
+    panelMesh.material.map.needsUpdate = true;
+    panelMesh.material.needsUpdate = true;
+  }
+}
+
+// ═══════════════════════════════════════════
+// HAND TRACKING
+// ═══════════════════════════════════════════
+function detectGesture(lm) {
+  const up = (tip, pip) => lm[tip].y < lm[pip].y - 0.03;
+  const iU = up(8,6), mU = up(12,10), rU = up(16,14), pU = up(20,18);
+  const tUp = lm[4].y < lm[2].y - 0.07;
+  const tDn = lm[4].y > lm[2].y + 0.07;
+  const allDown = !iU && !mU && !rU && !pU;
+
+  if (allDown && !tUp && !tDn) return 'fist';
+  if (tUp && allDown)          return 'thumb_up';
+  if (tDn && allDown)          return 'thumb_down';
+  if (iU && mU && !rU && !pU)  return 'v_sign';
+  if (iU && !mU && !rU && !pU) return 'point';
+  return 'open';
+}
+
+function handleGesture(g, lm) {
+  // cursor from index finger tip (landmark 8)
+  const ix = 1 - lm[8].x; // mirror
+  const iy = lm[8].y;
+  indexPos = { x: ix, y: iy };
+
+  // move cursor div
+  const cursor = document.getElementById('cursor');
+  cursor.style.left  = (ix * window.innerWidth)  + 'px';
+  cursor.style.top   = (iy * window.innerHeight) + 'px';
+  cursor.style.display = 'block';
+
+  // cursor sphere in 3d
+  const wx = (ix - 0.5) * 5;
+  const wy = -(iy - 0.5) * 3;
+  window.cursorSphere.position.set(wx, wy, -2);
+  window.cursorSphere.visible = true;
+
+  // fist = drag panel
+  if (g === 'fist') {
+    cursor.classList.add('grab');
+    if (!isDragging) {
+      isDragging = true;
+      dragOffset.x = panelWorld.x - wx;
+      dragOffset.y = panelWorld.y - wy;
+    }
+    panelWorld.x = wx + dragOffset.x;
+    panelWorld.y = wy + dragOffset.y;
+    updatePanelTexture();
+  } else {
+    cursor.classList.remove('grab');
+    if (isDragging) {
+      isDragging = false;
+      updatePanelTexture();
+    }
+  }
+
+  // cooldown gestures
+  const now = Date.now();
+  if (now - gestureCooldown > COOLDOWN) {
+    if (g === 'thumb_up')   { changeVolume(10);  gestureCooldown = now; }
+    if (g === 'thumb_down') { changeVolume(-10); gestureCooldown = now; }
+    if (g === 'v_sign')     { toggleMute();      gestureCooldown = now; }
+  }
+
+  // HUD
+  const labels = {
+    fist: '✊ مسك', thumb_up: '👍 صوت+',
+    thumb_down: '👎 صوت−', v_sign: '✌️ كتم',
+    point: '👆 إشارة', open: '🖐 مفتوح'
+  };
+  document.getElementById('gesture-label').textContent = labels[g] || g;
+  document.getElementById('vol-label').textContent = muted ? '🔇 كتم' : `🔊 ${volume}%`;
+}
+
+function initHandTracking(videoEl) {
+  const hands = new Hands({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.65,
+    minTrackingConfidence: 0.55
+  });
+
+  hands.onResults(results => {
+    if (results.multiHandLandmarks?.length > 0) {
+      const lm = results.multiHandLandmarks[0];
+      handVisible = true;
+      const g = detectGesture(lm);
+      handleGesture(g, lm);
+    } else {
+      handVisible = false;
+      isDragging = false;
+      document.getElementById('cursor').style.display = 'none';
+      window.cursorSphere.visible = false;
+      document.getElementById('gesture-label').textContent = 'لا يد';
+    }
+  });
+
+  const mpCam = new Camera(videoEl, {
+    onFrame: async () => { await hands.send({ image: videoEl }); },
+    width: 640, height: 480,
+    facingMode: 'environment'
+  });
+
+  mpCam.start();
+}
+
+// ═══════════════════════════════════════════
+// CONTROLS
+// ═══════════════════════════════════════════
+function togglePlay() {
+  if (!ytPlayer) return;
+  playing ? ytPlayer.pauseVideo() : ytPlayer.playVideo();
+  updatePanelTexture();
+}
+function changeVolume(d) {
+  volume = Math.max(0, Math.min(100, volume + d));
+  if (ytPlayer) ytPlayer.setVolume(volume);
+  updatePanelTexture();
+}
+function toggleMute() {
+  muted = !muted;
+  if (ytPlayer) muted ? ytPlayer.mute() : ytPlayer.unMute();
+  updatePanelTexture();
+}
+
+// tap panel to play/pause
+document.getElementById('three-canvas').addEventListener('click', () => {
+  // check if tap near panel
+  togglePlay();
+});
+
+// ═══════════════════════════════════════════
+// START
+// ═══════════════════════════════════════════
+async function startVR() {
+  document.getElementById('overlay').style.display = 'none';
+  document.getElementById('hud').classList.add('show');
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: 640, height: 480 },
+      audio: false
+    });
+    const vid = document.getElementById('cam');
+    vid.srcObject = stream;
+    await vid.play();
+
+    initThree();
+    initYT();
+    initHandTracking(vid);
+
+  } catch(e) {
+    document.getElementById('overlay').style.display = 'flex';
+    document.getElementById('status').textContent = '❌ ' + e.message;
+    document.getElementById('start-btn').disabled = false;
+    document.getElementById('start-btn').textContent = 'حاول مجدداً';
+  }
+}
+</script>
+</body>
+</html>

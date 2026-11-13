@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>VR Hand Control</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --accent: #6c63ff;
+    --accent2: #ff6584;
+    --text: #e8e8f0;
+    --muted: #555570;
+    --panel-bg: rgba(18,18,26,0.92);
+    --radius: 16px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  #camera-feed {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    opacity: 0.18; z-index: 0;
+    transform: scaleX(-1);
+  }
+  #hand-canvas {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    z-index: 1; pointer-events: none;
+    transform: scaleX(-1);
+  }
+  #app {
+    position: relative; z-index: 2;
+    display: flex; flex-direction: column;
+    height: 100dvh; padding: 12px; gap: 10px;
+  }
+  #header {
+    display: flex; align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: var(--panel-bg);
+    border-radius: var(--radius);
+    border: 1px solid rgba(108,99,255,0.2);
+    backdrop-filter: blur(12px); flex-shrink: 0;
+  }
+  #header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.05em; color: var(--accent); }
+  #gesture-display { font-size: 13px; color: var(--muted); transition: color 0.2s; }
+  #gesture-display.active { color: var(--accent2); font-weight: 600; }
+  #yt-panel {
+    flex: 1;
+    background: var(--panel-bg);
+    border-radius: var(--radius);
+    border: 1px solid rgba(108,99,255,0.15);
+    backdrop-filter: blur(12px);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    min-height: 0;
+  }
+  #yt-container { flex: 1; width: 100%; min-height: 0; }
+  #yt-container iframe { width: 100%; height: 100%; border: none; }
+  #controls {
+    display: flex; gap: 8px; padding: 8px 12px;
+    background: var(--panel-bg);
+    border-radius: var(--radius);
+    border: 1px solid rgba(108,99,255,0.15);
+    backdrop-filter: blur(12px);
+    flex-shrink: 0; align-items: center; justify-content: space-between;
+  }
+  .ctrl-btn {
+    background: rgba(108,99,255,0.12);
+    border: 1px solid rgba(108,99,255,0.3);
+    color: var(--text); border-radius: 10px;
+    padding: 8px 12px; font-size: 13px;
+    cursor: pointer; transition: background 0.15s, transform 0.1s;
+    touch-action: manipulation;
+  }
+  .ctrl-btn:active, .ctrl-btn.triggered {
+    background: rgba(108,99,255,0.35);
+    border-color: var(--accent); transform: scale(0.96);
+  }
+  #vol-display { font-size: 13px; color: var(--muted); min-width: 60px; text-align: center; }
+  #legend {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    padding: 8px 12px;
+    background: var(--panel-bg);
+    border-radius: var(--radius);
+    border: 1px solid rgba(255,101,132,0.1);
+    backdrop-filter: blur(12px); flex-shrink: 0;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+  #start-overlay {
+    position: fixed; inset: 0; z-index: 10;
+    background: rgba(10,10,15,0.97);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 20px; padding: 32px;
+  }
+  #start-overlay h2 { font-size: 22px; font-weight: 700; color: var(--accent); text-align: center; }
+  #start-overlay p { font-size: 14px; color: var(--muted); text-align: center; line-height: 1.6; max-width: 300px; }
+  #start-btn {
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 14px; padding: 14px 36px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  #status-msg {
+    font-size: 12px; color: var(--accent2);
+    text-align: center; min-height: 20px;
+  }
+</style>
+</head>
+<body>
+
+<video id="camera-feed" autoplay muted playsinline></video>
+<canvas id="hand-canvas"></canvas>
+
+<div id="start-overlay">
+  <h2>✋ VR Hand Control</h2>
+  <p>يتحكم في يوتيوب بإيماءات يدك</p>
+  <div style="display:flex;gap:16px;font-size:13px;color:var(--muted);text-align:center">
+    <div>✊<br><span style="font-size:11px">تشغيل/إيقاف</span></div>
+    <div>👍<br><span style="font-size:11px">صوت أعلى</span></div>
+    <div>👎<br><span style="font-size:11px">صوت أخفض</span></div>
+    <div>✌️<br><span style="font-size:11px">كتم</span></div>
+  </div>
+  <div id="status-msg">جاري تحميل MediaPipe...</div>
+  <button id="start-btn" onclick="startApp()" disabled>انتظر...</button>
+</div>
+
+<div id="app">
+  <div id="header">
+    <h1>✋ VR Hand Control</h1>
+    <span id="gesture-display">لا توجد يد</span>
+  </div>
+  <div id="yt-panel">
+    <div id="yt-container"></div>
+  </div>
+  <div id="controls">
+    <button class="ctrl-btn" id="btn-play" onclick="togglePlay()">▶ تشغيل</button>
+    <span id="vol-display">🔊 100%</span>
+    <button class="ctrl-btn" onclick="changeVolume(10)">+ صوت</button>
+    <button class="ctrl-btn" onclick="changeVolume(-10)">- صوت</button>
+    <button class="ctrl-btn" onclick="toggleMute()">🔇 كتم</button>
+  </div>
+  <div id="legend">
+    <div class="legend-item">✊ قبضة = تشغيل/إيقاف</div>
+    <div class="legend-item">👍 إبهام أعلى = رفع صوت</div>
+    <div class="legend-item">👎 إبهام أسفل = خفض صوت</div>
+    <div class="legend-item">✌️ V = كتم</div>
+  </div>
+</div>
+
+<script>
+// ── load scripts sequentially ──
+let mediapipeReady = false;
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed: ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function loadMediaPipe() {
+  const statusMsg = document.getElementById('status-msg');
+  const startBtn = document.getElementById('start-btn');
+
+  try {
+    statusMsg.textContent = 'تحميل drawing_utils...';
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js');
+
+    statusMsg.textContent = 'تحميل camera_utils...';
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js');
+
+    statusMsg.textContent = 'تحميل Hands...';
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js');
+
+    statusMsg.textContent = 'تحميل YouTube API...';
+    await loadScript('https://www.youtube.com/iframe_api');
+
+    mediapipeReady = true;
+    statusMsg.textContent = '✅ جاهز';
+    startBtn.textContent = 'ابدأ';
+    startBtn.disabled = false;
+
+  } catch (err) {
+    statusMsg.textContent = '❌ ' + err.message;
+    startBtn.textContent = 'أعد المحاولة';
+    startBtn.disabled = false;
+    startBtn.onclick = loadMediaPipe;
+  }
+}
+
+loadMediaPipe();
+</script>
+
+<script>
+// ── state ──
+let player = null;
+let hands = null;
+let mpCamera = null;
+let volume = 100;
+let muted = false;
+let playing = false;
+let lastGesture = null;
+let gestureCooldown = 0;
+const COOLDOWN_MS = 1200;
+
+// ── YouTube ──
+function onYouTubeIframeAPIReady() {
+  // called by YT API when ready — player created after user taps Start
+}
+
+function initYouTube() {
+  const container = document.getElementById('yt-container');
+  container.style.height = '100%';
+
+  player = new YT.Player('yt-container', {
+    height: '100%',
+    width: '100%',
+    videoId: 'jNQXAC9IVRw',
+    playerVars: { autoplay: 0, controls: 1, rel: 0, modestbranding: 1, playsinline: 1 },
+    events: {
+      onReady: () => { player.setVolume(volume); },
+      onStateChange: (e) => {
+        playing = (e.data === YT.PlayerState.PLAYING);
+        document.getElementById('btn-play').textContent = playing ? '⏸ إيقاف' : '▶ تشغيل';
+      }
+    }
+  });
+}
+
+function togglePlay() {
+  if (!player) return;
+  playing ? player.pauseVideo() : player.playVideo();
+  flashBtn('btn-play');
+}
+function changeVolume(delta) {
+  volume = Math.max(0, Math.min(100, volume + delta));
+  if (player) player.setVolume(volume);
+  document.getElementById('vol-display').textContent = muted ? '🔇 كتم' : `🔊 ${volume}%`;
+}
+function toggleMute() {
+  if (!player) return;
+  muted = !muted;
+  muted ? player.mute() : player.unMute();
+  document.getElementById('vol-display').textContent = muted ? '🔇 كتم' : `🔊 ${volume}%`;
+}
+function flashBtn(id) {
+  const b = document.getElementById(id);
+  b.classList.add('triggered');
+  setTimeout(() => b.classList.remove('triggered'), 300);
+}
+
+// ── gesture detection ──
+function detectGesture(lm) {
+  const up = (tip, pip) => lm[tip].y < lm[pip].y;
+  const indexUp  = up(8, 6);
+  const middleUp = up(12, 10);
+  const ringUp   = up(16, 14);
+  const pinkyUp  = up(20, 18);
+  const thumbUp  = lm[4].y < lm[2].y - 0.07;
+  const thumbDown= lm[4].y > lm[2].y + 0.07;
+  const allDown  = !indexUp && !middleUp && !ringUp && !pinkyUp;
+
+  if (allDown && !thumbUp && !thumbDown) return 'fist';
+  if (thumbUp && allDown) return 'thumb_up';
+  if (thumbDown && allDown) return 'thumb_down';
+  if (indexUp && middleUp && !ringUp && !pinkyUp) return 'v_sign';
+  return null;
+}
+
+function handleGesture(gesture) {
+  const now = Date.now();
+  if (now - gestureCooldown < COOLDOWN_MS) return;
+  if (gesture === lastGesture) return;
+  lastGesture = gesture;
+  gestureCooldown = now;
+
+  const display = document.getElementById('gesture-display');
+  display.classList.add('active');
+  setTimeout(() => display.classList.remove('active'), 600);
+
+  switch (gesture) {
+    case 'fist':      display.textContent = '✊ تشغيل/إيقاف'; togglePlay(); break;
+    case 'thumb_up':  display.textContent = '👍 رفع الصوت';   changeVolume(10); break;
+    case 'thumb_down':display.textContent = '👎 خفض الصوت';   changeVolume(-10); break;
+    case 'v_sign':    display.textContent = '✌️ كتم';          toggleMute(); break;
+  }
+}
+
+// ── hand tracking ──
+async function initHandTracking(videoEl) {
+  const canvas = document.getElementById('hand-canvas');
+  const ctx = canvas.getContext('2d');
+
+  hands = new Hands({
+    locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.6
+  });
+
+  hands.onResults((results) => {
+    canvas.width  = videoEl.videoWidth  || window.innerWidth;
+    canvas.height = videoEl.videoHeight || window.innerHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const display = document.getElementById('gesture-display');
+
+    if (results.multiHandLandmarks?.length > 0) {
+      const lm = results.multiHandLandmarks[0];
+      drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: 'rgba(108,99,255,0.6)', lineWidth: 2 });
+      drawLandmarks(ctx, lm, { color: 'rgba(255,101,132,0.9)', lineWidth: 1, radius: 4 });
+
+      const g = detectGesture(lm);
+      if (g) handleGesture(g);
+      else {
+        if (!display.classList.contains('active')) display.textContent = '👋 يد مرئية';
+        lastGesture = null;
+      }
+    } else {
+      display.textContent = 'لا توجد يد';
+      display.classList.remove('active');
+      lastGesture = null;
+    }
+  });
+
+  mpCamera = new Camera(videoEl, {
+    onFrame: async () => { await hands.send({ image: videoEl }); },
+    width: 640, height: 480,
+    facingMode: 'environment'
+  });
+
+  await mpCamera.start();
+}
+
+// ── start ──
+async function startApp() {
+  if (!mediapipeReady) { await loadMediaPipe(); return; }
+
+  document.getElementById('start-overlay').style.display = 'none';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: 640, height: 480 },
+      audio: false
+    });
+    const videoEl = document.getElementById('camera-feed');
+    videoEl.srcObject = stream;
+    await videoEl.play();
+
+    initYouTube();
+    await initHandTracking(videoEl);
+
+  } catch (err) {
+    const overlay = document.getElementById('start-overlay');
+    overlay.style.display = 'flex';
+    document.getElementById('status-msg').textContent = '❌ ' + err.message;
+    document.getElementById('start-btn').textContent = 'حاول مجدداً';
+    document.getElementById('start-btn').disabled = false;
+  }
+}
+</script>
+</body>
+</html>

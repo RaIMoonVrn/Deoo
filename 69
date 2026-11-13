@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>VR Hand Control — Pro</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden;
+    background:#000; font-family:system-ui, sans-serif;
+  }
+  #video {
+    position:fixed; inset:0; width:100%; height:100%;
+    object-fit:cover; z-index:0;
+  }
+  #canvas {
+    position:fixed; inset:0; width:100%; height:100%;
+    z-index:1; pointer-events:none;
+  }
+  #hud {
+    position:fixed; top:0; left:0; right:0; padding:16px;
+    display:flex; justify-content:space-between; align-items:center;
+    z-index:4; color:#fff; font-size:13px;
+    background:linear-gradient(180deg, rgba(0,0,0,.7), transparent);
+  }
+  #status { opacity:.9; }
+  #dot {
+    display:inline-block; width:10px; height:10px; border-radius:50%;
+    background:#f33; margin-left:6px; vertical-align:middle;
+  }
+  #dot.on { background:#0f8; box-shadow:0 0 10px #0f8; }
+  #title { font-weight:700; letter-spacing:.5px; }
+  #panel {
+    position:fixed; inset:0; display:flex; flex-direction:column;
+    justify-content:center; align-items:center; text-align:center;
+    background:rgba(0,0,0,.65); z-index:5; color:#fff; padding:24px;
+  }
+  #panel h1 { font-size:22px; margin-bottom:10px; }
+  #panel p { font-size:13.5px; opacity:.85; line-height:1.7; max-width:420px; }
+  .btn {
+    margin-top:18px; padding:14px 30px; border:0; border-radius:28px;
+    background:#fff; color:#000; font-weight:800; font-size:15px; cursor:pointer;
+    box-shadow:0 8px 24px rgba(255,255,255,.15);
+  }
+  .hidden { display:none; }
+  #cursor {
+    position:fixed; width:52px; height:52px; border-radius:50%;
+    border:2.5px solid rgba(255,255,255,.95); z-index:3;
+    transform:translate(-50%,-50%); pointer-events:none;
+    box-shadow:0 0 18px rgba(255,255,255,.35);
+    transition:width .07s, height .07s, border-color .07s;
+  }
+  #cursor.pinch {
+    width:28px; height:28px; border-color:#0f8;
+    box-shadow:0 0 22px rgba(0,255,140,.8);
+  }
+  #crosshair {
+    position:fixed; width:2px; height:2px; background:#fff;
+    z-index:3; transform:translate(-50%,-50%); pointer-events:none;
+  }
+</style>
+</head>
+<body>
+
+<video id="video" playsinline muted></video>
+<canvas id="canvas"></canvas>
+<div id="cursor" class="hidden"></div>
+<div id="crosshair" class="hidden"></div>
+
+<div id="hud">
+  <div id="status"><span id="dot"></span><span id="statusText">جاهز</span></div>
+  <div id="title">VR HAND CONTROL</div>
+</div>
+
+<div id="panel">
+  <h1>VR Hand Control</h1>
+  <p>ارفع يدك أمام الكاميرا الخلفية.<br>قرّب الإبهام والسبابة = نقرة.<br>حركة اليد = تحكم مباشر.</p>
+  <button class="btn" id="startBtn">تشغيل</button>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const cursor = document.getElementById('cursor');
+const crosshair = document.getElementById('crosshair');
+const dot = document.getElementById('dot');
+const statusText = document.getElementById('statusText');
+const panel = document.getElementById('panel');
+const startBtn = document.getElementById('startBtn');
+
+let hands, camera;
+let lastPinch = false;
+let smoothed = { x: innerWidth/2, y: innerHeight/2 };
+let velocity = { x:0, y:0 };
+
+function setStatus(ok, text) {
+  dot.classList.toggle('on', ok);
+  statusText.textContent = text;
+}
+
+function resize() {
+  canvas.width = innerWidth;
+  canvas.height = innerHeight;
+}
+addEventListener('resize', resize);
+resize();
+
+function onResults(results) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    cursor.classList.add('hidden');
+    crosshair.classList.add('hidden');
+    setStatus(false, 'لا توجد يد');
+    lastPinch = false;
+    return;
+  }
+
+  setStatus(true, 'تتبع نشط');
+
+  const lm = results.multiHandLandmarks[0];
+  const thumb = lm[4];
+  const index = lm[8];
+
+  const rawX = (thumb.x + index.x) / 2 * canvas.width;
+  const rawY = (thumb.y + index.y) / 2 * canvas.height;
+
+  // تنعيم ذكي + استجابة سريعة
+  const alpha = 0.55;
+  const prevX = smoothed.x;
+  const prevY = smoothed.y;
+  smoothed.x += (rawX - smoothed.x) * alpha;
+  smoothed.y += (rawY - smoothed.y) * alpha;
+  velocity.x = smoothed.x - prevX;
+  velocity.y = smoothed.y - prevY;
+
+  cursor.style.left = smoothed.x + 'px';
+  cursor.style.top = smoothed.y + 'px';
+  crosshair.style.left = smoothed.x + 'px';
+  crosshair.style.top = smoothed.y + 'px';
+  cursor.classList.remove('hidden');
+  crosshair.classList.remove('hidden');
+
+  const dx = thumb.x - index.x;
+  const dy = thumb.y - index.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const isPinch = dist < 0.05;
+
+  if (isPinch && !lastPinch) {
+    cursor.classList.add('pinch');
+    const el = document.elementFromPoint(smoothed.x, smoothed.y);
+    if (el && el.tagName === 'BUTTON') el.click();
+  }
+  if (!isPinch) cursor.classList.remove('pinch');
+  lastPinch = isPinch;
+
+  // رسم الهيكل
+  const connections = [
+    [0,1],[1,2],[2,3],[3,4],
+    [0,5],[5,6],[6,7],[7,8],
+    [5,9],[9,10],[10,11],[11,12],
+    [9,13],[13,14],[14,15],[15,16],
+    [13,17],[17,18],[18,19],[19,20],
+    [0,17]
+  ];
+
+  ctx.strokeStyle = 'rgba(0,255,150,.9)';
+  ctx.lineWidth = 3;
+  connections.forEach(([a,b]) => {
+    ctx.beginPath();
+    ctx.moveTo(lm[a].x * canvas.width, lm[a].y * canvas.height);
+    ctx.lineTo(lm[b].x * canvas.width, lm[b].y * canvas.height);
+    ctx.stroke();
+  });
+
+  ctx.fillStyle = 'rgba(255,255,255,.95)';
+  lm.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(p.x * canvas.width, p.y * canvas.height, 4.5, 0, Math.PI*2);
+    ctx.fill();
+  });
+}
+
+startBtn.addEventListener('click', async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 60 }
+      },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    video.style.transform = 'none';
+
+    hands = new Hands({
+      locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.55,
+      minTrackingConfidence: 0.55
+    });
+
+    hands.onResults(onResults);
+
+    camera = new Camera(video, {
+      onFrame: async () => { await hands.send({image: video}); },
+      width: 1920,
+      height: 1080
+    });
+    camera.start();
+
+    panel.classList.add('hidden');
+    setStatus(false, 'بانتظار اليد');
+  } catch (e) {
+    statusText.textContent = 'خطأ: ' + e.message;
+  }
+});
+</script>
+</body>
+</html>
